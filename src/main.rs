@@ -1,7 +1,6 @@
 use std::fs::{self};
 use std::path::{PathBuf, Path};
 use std::process::Command;
-use std::env;
 use std::sync::atomic::{Ordering,AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use std::cell::UnsafeCell;
@@ -36,25 +35,48 @@ impl<T> MultiSliceReadWriteLock<T> {
 
 fn main() {
     
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
-        println!("flatten [folder to process]");
-        return;
-    }
-
-    let folder = Path::new(&args[1]);
+    let matches = clap::App::new("Flatten")
+        .about("Flattens symlinks into files")
+        .arg(clap::Arg::new("DIRECTORY")
+            .about("Directory to flatten recursively")
+            .index(1)
+            .takes_value(true)
+            .required(true))
+        .arg(clap::Arg::new("SKIP_DIRS")
+            .about("Directories to skip, matches partial name")
+            .long("skip_dir")
+            .short('s')
+            .takes_value(true)
+            .multiple(true))
+        .get_matches();
+    
+    let folder = Path::new(matches.value_of("DIRECTORY").unwrap());
     if !folder.is_dir() {
         println!("Directory does not exist");
         return;
     }
+
+    println!("Gathering symlinks recursively for {}", folder.display());
 
     let num_cpus = 1;//num_cpus::get() * 2;
     let should_exit = Arc::new(AtomicBool::new(false));
     let counter = Arc::new(AtomicUsize::new(0));
     let bytes_copied = Arc::new(AtomicUsize::new(0));
 
-    println!("Gathering symlinks");
+    // Collect directories to skip
+    let skip_dirs = if let Some(skip_dirs) = matches.values_of("SKIP_DIRS") {
+        println!("Skipping directories containing:");
+        let mut skip_dirs_vec = vec![];
+        skip_dirs.clone().for_each(|d| {
+            println!("\t{}", d);
+            skip_dirs_vec.push(d);
+        });
+        skip_dirs_vec
+    } else {
+        vec![]
+    };
+
+    
 
     // Rather that doing read_dir which evaluates all symlinks and takes ages, run the dir command which is super fast
     // and parse the output to build up all symlinks.
@@ -63,24 +85,31 @@ fn main() {
     let mut current_dir: String = String::from("");
     let mut symlinks: Vec<PathBuf> = Vec::new();
     let mut num_dirs = 0;
+    let mut skip_directory = false;
     for line in output_str.lines() {
         if let Some(index) = line.find("Directory of ") {
             let dir = String::from(line);
             current_dir = String::from(&dir[index as usize + "Directory of ".len() .. dir.len()]) + "\\";
             num_dirs += 1;
-        } else if let Some(index) = line.find("<SYMLINK>") {
-            let file = String::from(line);
-            let mut filepath = current_dir.clone() + String::from(&file[index as usize + "<SYMLINK>".len() .. file.len()]).trim_start();
-            if let Some(index) = filepath.find(" [\\\\") {
-                filepath = String::from(&filepath[0 .. index as usize]);
+            skip_directory = false;
+            for s in &skip_dirs {
+                if current_dir.contains(s) {
+                    skip_directory = true;
+                }
             }
-            let filepath = PathBuf::from(&filepath);
-            symlinks.push(filepath);
+        } else if let Some(index) = line.find("<SYMLINK>") {
+            if !skip_directory {
+                let file = String::from(line);
+                let mut filepath = current_dir.clone() + String::from(&file[index as usize + "<SYMLINK>".len() .. file.len()]).trim_start();
+                if let Some(index) = filepath.find(" [\\\\") {
+                    filepath = String::from(&filepath[0 .. index as usize]);
+                }
+                let filepath = PathBuf::from(&filepath);
+                symlinks.push(filepath);
+            }
         }
     }
     
-    println!("Processing on {} threads", num_cpus);
-
     // listen for ctrl+c to shutdown cleanly
     {
         let should_exit = should_exit.clone();
@@ -105,7 +134,7 @@ fn main() {
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_ok() {
         if input.to_lowercase().starts_with("y") {
-            println!("Processing");
+            println!("Processing on {} threads", num_cpus);
             for _ in 1..num_cpus {
                 let symlinks = symlinks.clone();
                 let should_exit = should_exit.clone();
@@ -214,7 +243,7 @@ fn process_symlink(
                     process_symlink(symlink, index, total, should_exit, depth+1, bytes_copied);
                 } else {
                     println!("Retries exceed, exiting..");
-                    should_exit.store(true, std::sync::atomic::Ordering::SeqCst);
+                    //should_exit.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }
         }
