@@ -1,2 +1,2 @@
 # flatten
-Flattens symlinks in a directory recursively
+Converts symlinks from a network store in a directory recursively to a directory on local disk.
